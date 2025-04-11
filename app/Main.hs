@@ -12,7 +12,7 @@ import Control.Monad
 import Data.Void
 import Data.Text                    ( Text )
 import Data.Char                    ( isPrint )
-import Data.List                    ( partition, span )
+import Data.List                    ( partition, span, sortBy )
 import Data.Functor                 ( (<&>) )
 
 import Text.Megaparsec hiding       ( State )
@@ -33,7 +33,19 @@ capable of tranlating Haskell code into any other for which parse blocks have be
 
 main :: IO ()
 main = do
-  TIO.readFile "app/example.hs" >>= mapM_ (parseTest parseDeclaration) . preparse
+  (filepath : _) <- getArgs
+  
+  preparsed <- TIO.readFile filepath <&> preparse
+  let eDeclarations = map (runParser parseDeclaration filepath) preparsed
+  
+  case sequence eDeclarations of
+    Left e             -> error (show e)
+    Right declarations -> do
+      
+
+      undefined
+
+  
 
 
 
@@ -47,22 +59,24 @@ parseDeclaration = choice
   -- TODO
   ]
 
-
 parseFunctionD :: Parser Declaration
 parseFunctionD = do
   name <- lowerValid
   hspace
   FunctionD name . (: []) <$> parseClause
 
-
 parseClause :: Parser Clause
 parseClause = do
-  patterns <- many parsePattern
+  patterns <- many $ do
+    hspace
+    pattern <- parsePattern
+    hspace
+    pure pattern
+
   body <- parseBody  
   
   -- TODO: add the 'where' declarations 
   pure $ Clause patterns body []
-
 
 -- TODO
 parsePattern :: Parser Pattern
@@ -126,6 +140,7 @@ parseExpression = choice
   , try parseCastE
   , try parseDoE
   , try parseListE
+  , try parseParenE
   , try parseLitE
 
   ,     parseVarE -- parsing variables has to always be at the very end
@@ -138,7 +153,7 @@ parseApplyE = do
   
   args <- some $ do 
     hspace
-    parseAtomicExpression
+    parseExpression
 
   pure $ foldl ApplyE l args
 
@@ -148,15 +163,34 @@ parseInfixApplyE = do
   hspace
   o <- parseInfix
   hspace
-  r <- optional parseAtomicExpression
+  r <- optional parseExpression
 
   pure $ InfixApplyE l o r
+
+parseLambdaE :: Parser Expression
+parseLambdaE = do
+  char '(' >> hspace >> char '\\'
+
+  patterns <- some $ do
+    hspace
+    pattern <- parsePattern
+    hspace
+    pure pattern
+    
+  hspace >> string "->" >> hspace
+  
+  expr <- parseExpression
+  
+  hspace >> char ')'
+
+  pure $ LambdaE patterns expr
 
 parseAtomicExpression :: Parser Expression
 parseAtomicExpression = choice
   [ try parseParenE
   , try parseListE
   , try parseLitE
+  , try parseLambdaE
   , parseVarE
   ]
 
@@ -171,16 +205,64 @@ parseParenE = do
 
 parseInfix :: Parser Expression
 parseInfix = try $ between (char '`') (char '`') parseVarE
-         <|> VarE <$> choice ["++", "!!", "-", "*", "/", "$", ".", "<>", "+", ": "]
+         <|> VarE <$> choice ["++", "!!", "-", "*", "/", "$", ". ", "<>", "+", ": "]
 
--- TODO
 parseRangeE :: Parser Expression
-parseRangeE = undefined <$> string "TEMPORARY"
+parseRangeE = RangeE <$> parseRangeR
+
+parseRangeR :: Parser Range
+parseRangeR = choice
+  [ try parseRangeFromR
+  , try parseRangeFromThenR
+  , try parseRangeFromToR
+  , parseRangeFromThenToR
+  ]
+
+parseRangeFromR :: Parser Range
+parseRangeFromR = do
+  char '[' >> hspace
+  from <- parseExpression  
+  _ <- string ".."
+  _ <- hspace >> char ']'
+
+  pure $ FromR from
+
+parseRangeFromThenR :: Parser Range
+parseRangeFromThenR = do
+  char '[' >> hspace
+  from <- parseExpression
+  hspace >> char ',' >> hspace
+  thn <- parseExpression
+  _ <- string ".."
+  _ <- hspace >> char ']'
+
+  pure $ FromThenR from thn
+
+parseRangeFromToR :: Parser Range
+parseRangeFromToR = do
+  char '[' >> hspace
+  from <- parseExpression
+  hspace >> string ".." >> hspace
+  to <- parseExpression
+  _ <- hspace >> char ']'
+
+  pure $ FromToR from to
+
+parseRangeFromThenToR :: Parser Range
+parseRangeFromThenToR = do
+  char '[' >> hspace
+  from <- parseExpression
+  hspace >> char ',' >> hspace
+  thn <- parseExpression
+  hspace >> string ".." >> hspace
+  to <- parseExpression
+  _ <- hspace >> char ']'
+
+  pure $ FromThenToR from thn to
 
 -- TODO
 parseComphE :: Parser Expression
-parseComphE = do
-  undefined <$> string "TEMPORARY"
+parseComphE = undefined <$> string "TEMPORARY"
 
 parseDoE :: Parser Expression
 parseDoE = do
@@ -381,11 +463,6 @@ splice a b = a <> "\n" <> b
 
 type Parser = Parsec Void Text
 
--- the simplest representation of a program
-data Program = Program
-  { declarations  :: [Declaration]
-  , mainFunction  :: Declaration
-  }
 
 data Expression
   = VarE        Text                                              -- name
