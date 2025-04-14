@@ -25,6 +25,8 @@ executable Haskell-To-C
         base ^>=4.18.2.1
       , text
       , megaparsec
+      , time
+
     hs-source-dirs:   app
     default-language: GHC2021
 

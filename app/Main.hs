@@ -1,21 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE LambdaCase        #-}
 module Main where
 
 import System.Environment           ( getArgs )
 
+import Text.Megaparsec hiding       ( State )
 import Text.Megaparsec.Char
+import Text.Printf                  ( printf )
 
 import Control.Applicative          ()
-import Control.Monad
 
 import Data.Void
 import Data.Text                    ( Text )
 import Data.Char                    ( isPrint )
-import Data.List                    ( partition, span, sortBy )
+import Data.List                    (  sortBy )
 import Data.Functor                 ( (<&>) )
+import Data.Time.Clock              ( getCurrentTime, diffUTCTime )
 
-import Text.Megaparsec hiding       ( State )
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -33,20 +35,97 @@ capable of tranlating Haskell code into any other for which parse blocks have be
 
 main :: IO ()
 main = do
-  (filepath : _) <- getArgs
-  
-  preparsed <- TIO.readFile filepath <&> preparse
-  let eDeclarations = map (runParser parseDeclaration filepath) preparsed
+  (source : target : _) <- getArgs
+  timeStart <- getCurrentTime
+
+  putStrLn $ "parsing file " <> source <> " into " <> target
+
+  preparsed <- TIO.readFile source <&> preparse
+  let eDeclarations = map (runParser parseDeclaration source) preparsed
   
   case sequence eDeclarations of
     Left e             -> error (show e)
     Right declarations -> do
+      let translated = translate (sortDeclarations declarations)
+      
+      TIO.writeFile target translated
+      
+      timeEnd <- getCurrentTime
+      printf "Finished in %s \nWrote %d Bytes" (show (diffUTCTime timeEnd timeStart)) (T.length translated)
+
       
 
-      undefined
+-- !! TEMPORARY DEFINITIONS !!
+--
+-- there are many intricacies going into this
+-- in haskell the type declaration and the body declaration are two seperate things
+-- in C however its one and the same, 
+-- as such we have to translate functions in pairs of type and body declarations
+translate :: [Declaration] -> Text
+translate = undefined
 
-  
 
+
+
+translateFunction :: Declaration -> Declaration -> Text
+translateFunction (SigD name typ) (FunctionD _ [Clause ps (NormalB expr) _]) = 
+  T.pack (show (hTypeToC (last ts))) <> name <> "(" <> variables (init ts) ps <> ") {\n"
+  <> translateExpression expr <> "\n}"
+  where
+    ts = typeToList typ
+translateFunction _ _ = error "translateFunction unexpected input"
+
+translateDeclaration :: Declaration -> Text
+translateDeclaration = \case
+  ImportD "Prelude" -> "#include <stdio.h>"
+  ModuleD name      -> "// module " <> name
+  _ -> undefined
+
+translateExpression :: Expression -> Text
+translateExpression = \case
+  DoE sts                 -> T.concat $ map (\s -> translateStatement s <> "\n") sts
+  ApplyE (VarE "putStr") (LitE (StringL xs)) -> "printf(" <> xs <> ");"
+  _ -> undefined
+
+translateStatement :: Statement -> Text
+translateStatement = \case
+  NoBindS expr -> translateExpression expr
+  _ -> undefined
+
+variables :: [Text] -> [Pattern] -> Text
+variables ts ps = T.concat $ map (\(t, VarP n) -> t <> " " <> n <> " ") (zip ts ps)
+
+typeToList :: Type -> [Text]
+typeToList (VarT t) = [t]
+typeToList (ApplyT (VarT t) rest) = t : typeToList rest
+typeToList _ = undefined
+
+sortDeclarations :: [Declaration] -> [Declaration]
+sortDeclarations = sortBy (\x y -> compare (declarationPos x) (declarationPos y))
+
+
+hTypeToC :: Text -> Text
+hTypeToC = \case
+  "Int"     -> "int"
+  "Integer" -> "int"
+  "Double"  -> "double"
+  "Bool"    -> "bool"
+  "IO"      -> "int"
+  _ -> undefined
+
+declarationPos :: Declaration -> Int
+declarationPos = \case 
+  ModuleD _           -> 0
+  ImportD _           -> 1
+  ClassD {}           -> 2
+  DataD  {}           -> 3
+  NewtypeD {}         -> 4
+  TypeD {}            -> 5
+  InstanceD {}        -> 6
+  SigD "main" _       -> 100
+  FunctionD "main" _  -> 110
+  SigD {}             -> 50
+  FunctionD {}        -> 60
 
 
 parseDeclaration :: Parser Declaration
@@ -133,8 +212,8 @@ parseBodyGuarded = undefined  <$> string "TEMPORARY" -- TODO
 -- TODO:
 parseExpression :: Parser Expression
 parseExpression = choice
-  [ try parseApplyE
-  , try parseInfixApplyE
+  [ try parseInfixApplyE
+  , try parseApplyE
   , try parseRangeE
   , try parseComphE
   , try parseCastE
@@ -155,6 +234,8 @@ parseApplyE = do
     hspace
     parseExpression
 
+  hspace
+
   pure $ foldl ApplyE l args
 
 parseInfixApplyE :: Parser Expression
@@ -164,12 +245,13 @@ parseInfixApplyE = do
   o <- parseInfix
   hspace
   r <- optional parseExpression
+  hspace
 
   pure $ InfixApplyE l o r
 
 parseLambdaE :: Parser Expression
 parseLambdaE = do
-  char '(' >> hspace >> char '\\'
+  _ <- char '(' >> hspace >> char '\\'
 
   patterns <- some $ do
     hspace
@@ -181,7 +263,7 @@ parseLambdaE = do
   
   expr <- parseExpression
   
-  hspace >> char ')'
+  _ <- hspace >> char ')'
 
   pure $ LambdaE patterns expr
 
@@ -199,13 +281,14 @@ parseParenE = do
   char '(' >> hspace
   expr <- parseExpression
   _ <- hspace >> char ')'
-
+  
+  hspace
   pure $ ParensE expr
 
 
 parseInfix :: Parser Expression
 parseInfix = try $ between (char '`') (char '`') parseVarE
-         <|> VarE <$> choice ["++", "!!", "-", "*", "/", "$", ". ", "<>", "+", ": "]
+         <|> VarE <$> choice ["==", "/=", "++", "!!", "-", "*", "/", "$", ". ", "<>", "+", ": "]
 
 parseRangeE :: Parser Expression
 parseRangeE = RangeE <$> parseRangeR
@@ -224,7 +307,8 @@ parseRangeFromR = do
   from <- parseExpression  
   _ <- string ".."
   _ <- hspace >> char ']'
-
+  
+  hspace
   pure $ FromR from
 
 parseRangeFromThenR :: Parser Range
@@ -432,7 +516,7 @@ upperValid :: Parser Text
 upperValid = T.pack <$> ((:) <$> upperChar <*> many validChar)
 
 validChar :: Parser Char
-validChar = alphaNumChar <|> char '\''
+validChar = alphaNumChar <|> char '\'' <|> char '_'
 
 -- the preparse
 preparse :: Text -> [Text]
