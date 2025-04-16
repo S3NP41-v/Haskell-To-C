@@ -14,7 +14,7 @@ import Control.Applicative          ()
 import Data.Void
 import Data.Text                    ( Text )
 import Data.Char                    ( isPrint )
-import Data.List                    (  sortBy )
+import Data.List                    (  sortBy, find )
 import Data.Functor                 ( (<&>) )
 import Data.Time.Clock              ( getCurrentTime, diffUTCTime )
 
@@ -51,40 +51,58 @@ main = do
       TIO.writeFile target translated
       
       timeEnd <- getCurrentTime
-      printf "Finished in %s \nWrote %d Bytes" (show (diffUTCTime timeEnd timeStart)) (T.length translated)
+      printf "Finished in %s \nWrote %d Bytes\n" (show (diffUTCTime timeEnd timeStart)) (T.length translated)
 
       
 
 -- !! TEMPORARY DEFINITIONS !!
---
--- there are many intricacies going into this
--- in haskell the type declaration and the body declaration are two seperate things
--- in C however its one and the same, 
--- as such we have to translate functions in pairs of type and body declarations
 translate :: [Declaration] -> Text
-translate = undefined
-
-
-
-
-translateFunction :: Declaration -> Declaration -> Text
-translateFunction (SigD name typ) (FunctionD _ [Clause ps (NormalB expr) _]) = 
-  T.pack (show (hTypeToC (last ts))) <> name <> "(" <> variables (init ts) ps <> ") {\n"
-  <> translateExpression expr <> "\n}"
-  where
-    ts = typeToList typ
-translateFunction _ _ = error "translateFunction unexpected input"
+translate ds = T.unlines (map translateDeclaration ds <> map translateFunction (functions ds))
 
 translateDeclaration :: Declaration -> Text
 translateDeclaration = \case
-  ImportD "Prelude" -> "#include <stdio.h>"
   ModuleD name      -> "// module " <> name
+  ImportD "Prelude" -> "#include <stdio.h>"
+  SigD {}           -> ""
+  FunctionD {}      -> ""
   _ -> undefined
+
+functions :: [Declaration] -> [Function]
+functions ds = foldr (\x y -> case x of
+                      s@(SigD name _) -> case findFunD name ds of
+                        Nothing         -> y
+                        Just fd         -> (s, fd) : y
+                      _               -> y
+                     ) [] ds
+  where
+    findFunD :: Text -> [Declaration] -> Maybe Declaration
+    findFunD _ []        = Nothing
+    findFunD name (x:xs) = case x of
+      FunctionD name' cs -> if name == name' then Just (FunctionD name cs) else findFunD name xs
+      _                  -> findFunD name xs
+
+-- temp
+-- supporting a single clause for now as C does not, needs infrastructure on C's side
+-- supporting no where declarations for now
+-- supporting only NormalB for now
+translateFunction :: Function -> Text
+translateFunction (SigD name typ, FunctionD _ [Clause pts (NormalB expr) _]) = T.pack $ printf
+  "%s %s(%s) {\n\
+  \%s\
+  \}" (hTypeToC (last ts)) 
+      name 
+      (T.intercalate ", " (zipWith (\t n -> hTypeToC t <> " " <> n) ts ps)) 
+      ( translateExpression expr )
+  where
+    ts = typeToList typ
+    ps = patternsToList pts
+translateFunction _ = undefined
 
 translateExpression :: Expression -> Text
 translateExpression = \case
-  DoE sts                 -> T.concat $ map (\s -> translateStatement s <> "\n") sts
-  ApplyE (VarE "putStr") (LitE (StringL xs)) -> "printf(" <> xs <> ");"
+  DoE sts                 -> T.unlines $ map translateStatement sts
+  ApplyE (VarE fun) expr  -> knownFunctions fun <> "(" <> translateExpression expr <> ");"
+  LitE (StringL st)       -> "\"" <> st <> "\""
   _ -> undefined
 
 translateStatement :: Statement -> Text
@@ -92,17 +110,23 @@ translateStatement = \case
   NoBindS expr -> translateExpression expr
   _ -> undefined
 
-variables :: [Text] -> [Pattern] -> Text
-variables ts ps = T.concat $ map (\(t, VarP n) -> t <> " " <> n <> " ") (zip ts ps)
+knownFunctions :: Text -> Text
+knownFunctions = \case
+  "putStr" -> "printf"
+  unknown  -> unknown
 
 typeToList :: Type -> [Text]
 typeToList (VarT t) = [t]
 typeToList (ApplyT (VarT t) rest) = t : typeToList rest
 typeToList _ = undefined
 
+patternsToList :: [Pattern] -> [Text]
+patternsToList [] = []
+patternsToList (VarP t : xs) = t : patternsToList xs
+patternsToList _ = undefined
+
 sortDeclarations :: [Declaration] -> [Declaration]
 sortDeclarations = sortBy (\x y -> compare (declarationPos x) (declarationPos y))
-
 
 hTypeToC :: Text -> Text
 hTypeToC = \case
@@ -110,6 +134,7 @@ hTypeToC = \case
   "Integer" -> "int"
   "Double"  -> "double"
   "Bool"    -> "bool"
+  "Char"    -> "char"
   "IO"      -> "int"
   _ -> undefined
 
@@ -546,7 +571,7 @@ splice :: Text -> Text -> Text
 splice a b = a <> "\n" <> b
 
 type Parser = Parsec Void Text
-
+type Function = (Declaration, Declaration) -- (SigD, FunctionD)
 
 data Expression
   = VarE        Text                                              -- name
@@ -575,15 +600,15 @@ data Range
   deriving ( Show )
 
 data Declaration
-  = FunctionD Text [Clause]                                           -- function definition
-  | SigD      Text Type                                               -- function declaration
-  | DataD     Context Text (Maybe Kind) [DataConstructor] [Derive]    -- data type definition
-  | NewtypeD  Context Text (Maybe Kind) DataConstructor   [Derive]    -- netype definition
+  = FunctionD Text [Clause]                                         -- function definition
+  | SigD      Text Type                                             -- function declaration
+  | DataD     Context Text (Maybe Kind) [DataConstructor] [Derive]  -- data type definition
+  | NewtypeD  Context Text (Maybe Kind) DataConstructor   [Derive]  -- netype definition
   | TypeD     Text Type
   | ClassD    Context Text [Declaration]
   | InstanceD Context Type   [Declaration]
-  | ImportD   Text  -- im lazy
-  | ModuleD   Text  -- im lazy 2: electric boogaloo
+  | ImportD   Text
+  | ModuleD   Text
   deriving ( Show )
 
 data Clause = Clause [Pattern] Body [Declaration]
